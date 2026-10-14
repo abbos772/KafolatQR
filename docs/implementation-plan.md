@@ -260,7 +260,7 @@ Records all payment attempts and confirmed results. Users cannot insert/update/d
 | `failure_reason` | `text` | NULL |
 | `created_at` | `timestamptz` | default `now()` |
 
-Index on (`store_id`, `created_at`). No RLS policies for authenticated users — write-only via service-role.
+UNIQUE(`provider`, `provider_payment_id`) — prevents duplicate payment records for the same provider payment. Index on (`store_id`, `created_at`). No RLS policies for authenticated users — write-only via service-role.
 
 ### 2.10 `billing_events`
 
@@ -309,7 +309,7 @@ Index on (`store_id`, `created_at`). No SELECT/UPDATE/DELETE policies. Written o
 | Role | stores | store_members | products | warranty_cards | warranty_documents | subscription | payment_transactions | billing_events | audit_events |
 |------|--------|---------------|----------|----------------|---------------------|--------------|---------------------|----------------|--------------|
 | Anon | None | None | None | None | None | None | None | None | None |
-| Store owner (authenticated) | CRUD own | CRUD own store's | CRUD own store's | CRUD own store's | CRUD own store's | Read own | None | None | None |
+| Store owner (authenticated) | Select/Insert/Update (archive) own | Select/Insert/Delete staff own store's | CRUD own store's | Select/Insert/Update own store's (no delete) | Select/Insert/Update own store's (no delete) | Read own | None | None | None |
 | Platform admin (service-role) | Full | Full | Full | Full | Full | Full | Full | Full | Full |
 
 **MVP simplification:** Only `owner` role has RLS policies. `staff` role exists in schema but no policies grant staff access. Staff functionality deferred to a later phase.
@@ -344,6 +344,8 @@ GRANT EXECUTE ON FUNCTION public.get_user_owner_store_ids() TO authenticated;
 - Granted to `authenticated` so RLS policies can call it; `service_role` already has full table access.
 
 **Recursion avoidance:** The function reads `store_members` as `postgres` (bypassing RLS on that table). RLS policies on `store_members` do not call this function — they check membership directly. No recursive loop.
+
+**SECURITY DEFINER grant reconciliation:** This function is intentionally granted to `authenticated` because it only returns the caller's own store IDs and cannot access other users' data. Other SECURITY DEFINER functions (`audit_log`, `handle_new_store`, `verify_warranty_by_hash`, `rotate_warranty_token`, `process_payment_webhook`) are granted only to `service_role`.
 
 **`stores`**
 ```sql
@@ -394,10 +396,10 @@ CREATE POLICY store_members_delete ON store_members
 ```
 
 **Membership integrity rules:**
-- Owner memberships are created exclusively by the `handle_new_store()` trigger (runs as service-role on store insert).
+- Owner memberships are created exclusively by the `handle_new_store()` trigger (SECURITY DEFINER, owned by `postgres`).
 - `store_members_insert` policy only allows inserting `role = 'staff'` — users cannot create owner memberships for themselves or others.
 - `store_members_delete` policy only allows deleting `role = 'staff'` rows — owners cannot delete their own owner membership or other owners' memberships. This prevents store orphaning.
-- To transfer store ownership, the current owner must update `stores.owner_id` directly (enforced by `stores_update` policy requiring `owner_id = auth.uid()`), which should be done via a dedicated admin operation, not through membership manipulation.
+- Ownership transfer is not supported in MVP. The `stores_update` policy requires `owner_id = auth.uid()`, preventing any ownership change through the application.
 
 **`products`**
 ```sql
@@ -435,10 +437,20 @@ CREATE POLICY warranty_cards_no_delete ON warranty_cards
 ```sql
 ALTER TABLE warranty_documents ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY warranty_documents_all ON warranty_documents
-  FOR ALL TO authenticated
+CREATE POLICY warranty_documents_select ON warranty_documents
+  FOR SELECT TO authenticated
+  USING (store_id IN (SELECT public.get_user_owner_store_ids()));
+
+CREATE POLICY warranty_documents_insert ON warranty_documents
+  FOR INSERT TO authenticated
+  WITH CHECK (store_id IN (SELECT public.get_user_owner_store_ids()));
+
+CREATE POLICY warranty_documents_update ON warranty_documents
+  FOR UPDATE TO authenticated
   USING (store_id IN (SELECT public.get_user_owner_store_ids()))
   WITH CHECK (store_id IN (SELECT public.get_user_owner_store_ids()));
+
+-- No DELETE policy: documents are archived, never hard-deleted
 ```
 
 **`private.warranty_tokens`**
@@ -461,7 +473,7 @@ CREATE POLICY subscription_select ON subscription
 
 ### 3.3 Store Creation Trigger — Auto Owner Membership
 
-Ensures every newly created store automatically receives a valid owner membership. The function is `SECURITY DEFINER` owned by `postgres` — it executes with the owner's privileges, not the caller's. Users cannot bypass it.
+Ensures every newly created store automatically receives a valid owner membership. The function is `SECURITY DEFINER` owned by `postgres` — it executes with `postgres` privileges, not the caller's.
 
 ```sql
 CREATE OR REPLACE FUNCTION public.handle_new_store()
@@ -507,7 +519,7 @@ BEGIN
       'store_warranty_months', jsonb_build_object('new', NEW.store_warranty_months),
       'manufacturer_warranty_months', jsonb_build_object('new', NEW.manufacturer_warranty_months),
       'manufacturer_warranty_start', jsonb_build_object('new', NEW.manufacturer_warranty_start),
-      'manufacturer_claim_url', jsonb_build_object('new', NEW.manufacturer_claim_url)
+      'manufacturer_claim_url', jsonb_build_object('changed', true)
     );
 
     INSERT INTO public.audit_events (actor_id, store_id, action, entity_type, entity_id, changed_fields)
@@ -534,7 +546,11 @@ BEGIN
       changed := changed || jsonb_build_object('manufacturer_warranty_start', jsonb_build_object('old', OLD.manufacturer_warranty_start, 'new', NEW.manufacturer_warranty_start));
     END IF;
     IF NEW.manufacturer_claim_url IS DISTINCT FROM OLD.manufacturer_claim_url THEN
-      changed := changed || jsonb_build_object('manufacturer_claim_url', jsonb_build_object('old', OLD.manufacturer_claim_url, 'new', NEW.manufacturer_claim_url));
+      changed := changed || jsonb_build_object('manufacturer_claim_url', jsonb_build_object('changed', true));
+    END IF;
+
+    IF changed = '{}'::jsonb THEN
+      RETURN NEW;
     END IF;
 
     INSERT INTO public.audit_events (actor_id, store_id, action, entity_type, entity_id, changed_fields)
@@ -627,40 +643,133 @@ When `status` changes to `cancelled`, `returned`, or `archived`, the application
 
 ## 5. QR Token Lifecycle and Public Verification
 
-### 5.1 Token Generation
+### 5.1 Token Generation and Issuance
 
-- `crypto.getRandomValues(new Uint8Array(32))` → base64url-encode → 43-character token (256 bits entropy).
-- Store only `SHA-256(token)` in `private.warranty_tokens.token_hash`.
-- Raw token exists only in the QR payload URL: `${VITE_APP_URL}/verify#<raw_token>`
-- Token is placed in the URL **hash fragment** (`#`) — browsers do not send fragments to the initial page request. However, the frontend subsequently sends the token in a POST request body to the Edge Function. Standard request logging at the CDN/load balancer level may capture POST body metadata but not body contents when TLS is properly configured. Tokens are never placed in URL query parameters or path segments.
+**Generation:** `crypto.getRandomValues(new Uint8Array(32))` → base64url-encode → 43-character token (256 bits entropy). Raw tokens are generated server-side and never stored in the database.
+
+**Storage:** Only `SHA-256(token)` is stored in `private.warranty_tokens.token_hash`. Raw tokens exist only transiently to deliver the QR payload URL to the authorized owner.
+
+**Issuance RPC:** Token creation is performed by a server-only database function:
+
+```sql
+CREATE OR REPLACE FUNCTION public.issue_warranty_token(
+  p_warranty_card_id uuid,
+  p_token_hash text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  PERFORM 1 FROM public.warranty_cards WHERE id = p_warranty_card_id FOR UPDATE;
+
+  IF NOT EXISTS (SELECT 1 FROM public.warranty_cards WHERE id = p_warranty_card_id AND status = 'active' AND is_qr_visible = true) THEN
+    RAISE EXCEPTION 'Warranty card not eligible for token';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM private.warranty_tokens WHERE warranty_card_id = p_warranty_card_id AND is_active = true) THEN
+    RAISE EXCEPTION 'Active token already exists';
+  END IF;
+
+  INSERT INTO private.warranty_tokens (warranty_card_id, token_hash, is_active)
+  VALUES (p_warranty_card_id, p_token_hash, true);
+END;
+$$;
+
+ALTER FUNCTION public.issue_warranty_token(uuid, text) OWNER TO postgres;
+REVOKE EXECUTE ON FUNCTION public.issue_warranty_token(uuid, text) FROM PUBLIC, authenticated;
+GRANT EXECUTE ON FUNCTION public.issue_warranty_token(uuid, text) TO service_role;
+```
+
+**Edge Function authorization:** The Edge Function authenticates the caller's JWT, loads the warranty card via RLS (ensuring caller ownership), and validates the token hash format (64-character hex for SHA-256) before calling the RPC with the service-role key. All three token RPCs (issue, rotate, revoke) lock the same `warranty_cards` row for serialization.
+
+**Atomicity note:** Each RPC is individually atomic (single database transaction). Separate client requests are not atomic — the Edge Function must wait for each RPC response before making the next call.
+
+**QR payload URL:** `${VITE_APP_URL}/verify#<raw_token>` — token is placed in the URL hash fragment. Browsers do not send fragments to the initial page request. The frontend subsequently sends the token in a POST request body to the verify Edge Function. Tokens are never placed in URL query parameters or path segments. Application and infrastructure logs must not capture raw tokens.
 
 ### 5.2 Token Rotation
 
-Token rotation is atomic — both operations run in a single transaction:
+Token rotation is performed by a server-only database function that executes atomically:
 
 ```sql
-BEGIN;
-  -- Revoke old token
+CREATE OR REPLACE FUNCTION public.rotate_warranty_token(
+  p_warranty_card_id uuid,
+  p_new_token_hash text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  -- Lock the parent warranty card row to serialize all token operations
+  PERFORM 1 FROM public.warranty_cards
+  WHERE id = p_warranty_card_id
+  FOR UPDATE;
+
+  -- Revoke old token (no-op if none exists)
   UPDATE private.warranty_tokens SET is_active = false, rotated_at = now()
-  WHERE warranty_card_id = $1 AND is_active = true;
+  WHERE warranty_card_id = p_warranty_card_id AND is_active = true;
 
   -- Activate new token
   INSERT INTO private.warranty_tokens (warranty_card_id, token_hash, is_active)
-  VALUES ($1, $2, true);
-COMMIT;
+  VALUES (p_warranty_card_id, p_new_token_hash, true);
+END;
+$$;
+
+ALTER FUNCTION public.rotate_warranty_token(uuid, text) OWNER TO postgres;
+REVOKE EXECUTE ON FUNCTION public.rotate_warranty_token(uuid, text) FROM PUBLIC, authenticated;
+GRANT EXECUTE ON FUNCTION public.rotate_warranty_token(uuid, text) TO service_role;
 ```
 
-- If either operation fails, the entire transaction rolls back — the prior valid token remains active.
-- Partial unique index (`WHERE is_active = true`) ensures at most one active token per warranty card.
-- Concurrent rotation attempts are serialized by the unique index — one succeeds, the other fails with a constraint violation and rolls back.
-- Old inactive hashes are preserved (not deleted) for audit purposes.
-- Old token becomes unknown → returns generic 404.
+**Concurrency behavior:** The `FOR UPDATE` lock on the parent warranty card row serializes all concurrent token operations (rotation, revocation, issuance) for the same card. If two rotation requests arrive concurrently:
+1. Both attempt to lock the warranty card row.
+2. One acquires the lock first; the other waits.
+3. The first completes (revokes old token, inserts new one).
+4. The second acquires the lock, revokes the token just inserted by the first, and inserts its own new token.
+5. The partial unique index guarantees at most one active token at any point.
+
+**No active token case:** If no active token exists (e.g., first rotation after revocation), the UPDATE is a no-op and the INSERT creates the first active token. The partial unique index is satisfied.
+
+**Atomicity:** The function executes as a single database operation. PostgreSQL wraps each function call in an implicit transaction. If either the UPDATE or INSERT fails, the entire operation rolls back — the prior valid token remains active.
+
+**Concurrency protection:** `FOR UPDATE` row lock serializes concurrent rotation attempts for the same warranty card. The partial unique index (`WHERE is_active = true`) provides a second layer of protection — if two rotations somehow proceed concurrently, one will fail with a unique violation.
+
+**Old token behavior:** Old inactive hashes are preserved (not deleted) for audit purposes. Old token becomes unknown → returns generic 404.
 
 ### 5.3 Revocation
 
-- Seller sets `is_qr_visible = false` on warranty card AND `is_active = false` on token → Edge Function returns 404 (same as unknown).
-- `status` set to `cancelled`, `returned`, or `archived` → application also sets `is_qr_visible = false` and `is_active = false`.
+Token revocation is performed by a server-only database function:
+
+```sql
+CREATE OR REPLACE FUNCTION public.revoke_warranty_token(
+  p_warranty_card_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  PERFORM 1 FROM public.warranty_cards
+  WHERE id = p_warranty_card_id
+  FOR UPDATE;
+
+  UPDATE private.warranty_tokens SET is_active = false, rotated_at = now()
+  WHERE warranty_card_id = p_warranty_card_id AND is_active = true;
+END;
+$$;
+
+ALTER FUNCTION public.revoke_warranty_token(uuid) OWNER TO postgres;
+REVOKE EXECUTE ON FUNCTION public.revoke_warranty_token(uuid) FROM PUBLIC, authenticated;
+GRANT EXECUTE ON FUNCTION public.revoke_warranty_token(uuid) TO service_role;
+```
+
+**Application behavior:**
+- Seller sets `is_qr_visible = false` on warranty card AND calls `revoke_warranty_token()` → verification returns 404 (same as unknown).
+- `status` set to `cancelled`, `returned`, or `archived` → application sets `is_qr_visible = false` and calls `revoke_warranty_token()`.
 - Revoked, inactive, and unknown tokens all return the same generic 404 — no distinction leaked.
+- The verify RPC (`verify_warranty_by_hash`) independently enforces `is_active = true`, `is_qr_visible = true`, and `status = 'active'` — even if application logic fails to revoke, the database blocks verification.
 
 ### 5.4 Edge Function: `verify-warranty`
 
@@ -671,9 +780,9 @@ COMMIT;
 **Logic:**
 1. Validate token against `^[A-Za-z0-9_-]{43}$`. Invalid → 400.
 2. Compute SHA-256 hash.
-3. Call `public.verify_warranty_by_hash(p_token_hash := hash)` — a narrowly scoped SECURITY DEFINER RPC that returns only the allowlisted verification data (see below).
-4. Function returns `NULL` if token is unknown, inactive, or warranty card is not QR-visible → Edge Function returns **404**.
-5. Match found → Edge Function computes warranty status from dates, returns allowlisted fields.
+3. Call `public.verify_warranty_by_hash(p_token_hash := hash)` — a narrowly scoped SECURITY DEFINER RPC that returns zero or one row with only the allowlisted verification data (see below).
+4. If the RPC returns zero rows (token unknown, inactive, warranty not QR-visible, or warranty status not `active`) → Edge Function returns **404**.
+5. If the RPC returns one row → Edge Function returns the allowlisted fields as JSON.
 
 **Why POST:** Token is sent in the request body, not in URL query parameters. Prevents token leakage through server logs, browser history, and referer headers.
 
@@ -762,15 +871,16 @@ GRANT EXECUTE ON FUNCTION public.verify_warranty_by_hash(text) TO service_role;
 
 ### 5.8 Logging
 
-- Never log raw tokens or full request bodies.
-- Log only: timestamp, IP hash, token hash prefix (first 8 chars), response status.
-- Tokens are in POST body, not URL — standard request logging will not capture them.
+- Never log raw tokens, token hashes, or hash prefixes.
+- Log only: timestamp, IP hash, response status.
+- POST request bodies may appear in application or infrastructure logs depending on configuration. The application must not log request bodies. Infrastructure-level logging (CDN, load balancer) should be configured to exclude sensitive paths.
+- Tokens in URL fragments are not sent to the server during the initial page load.
 
 ### 5.9 SECURITY DEFINER Constraints
 
 - `search_path = ''` — prevents search_path manipulation.
 - All objects schema-qualified (e.g., `public.store_members`, `private.warranty_tokens`).
-- `EXECUTE` revoked from `PUBLIC` and `authenticated`; granted only to `service_role`.
+- `EXECUTE` revoked from `PUBLIC` and `authenticated`; granted only to `service_role`. Exception: `get_user_owner_store_ids()` is granted to `authenticated` because it only returns the caller's own store IDs.
 
 ---
 
@@ -783,21 +893,21 @@ Sellers upload manufacturer warranty documents (PDFs, images) or purchase receip
 ### 6.2 Storage Design
 
 - **Supabase Storage bucket:** `warranty-documents` (private, not public).
-- **Path structure:** `{store_id}/{warranty_card_id}/{file_name}`
-- **Access:** Only via signed URLs generated by the backend (service-role) for authenticated owner. Never public URLs.
+- **Path structure:** `{store_id}/{warranty_card_id}/{uuid}/{sanitized_filename}`
+- **Access:** Only via signed URLs generated by the backend Edge Function for authenticated owner. Never public URLs.
 
 ### 6.3 Upload Flow
 
 1. Client requests signed upload URL from a backend Edge Function.
-2. Edge Function verifies caller's JWT + confirms ownership of the target warranty card.
-3. Client uploads file directly to Supabase Storage at verified path.
-4. Client creates `warranty_documents` row with `storage_path`.
-5. RLS + composite FK on `warranty_documents` ensures store ownership and cross-store attachment prevention.
+2. Edge Function verifies caller's JWT + confirms ownership of the target warranty card (checks `warranty_cards.store_id` against caller's owner stores via RLS).
+3. Edge Function validates file metadata (MIME type, size, filename) before issuing URL.
+4. Client uploads file directly to Supabase Storage at server-generated unique path (`{store_id}/{warranty_card_id}/{uuid}/{sanitized_filename}`). Edge Function validates path ownership before issuing the signed upload URL.
+5. Client creates `warranty_documents` row with `storage_path`. RLS + composite FK on `warranty_documents` ensures store ownership and cross-store attachment prevention.
 
 ### 6.4 Download Flow
 
 1. Client requests signed download URL via Edge Function.
-2. Edge Function verifies caller's JWT + RLS ownership of the warranty card.
+2. Edge Function verifies caller's JWT + confirms the document belongs to a warranty card owned by the caller.
 3. Returns time-limited signed URL (5-minute expiry — proposal).
 
 ### 6.5 Validation
@@ -808,23 +918,26 @@ Sellers upload manufacturer warranty documents (PDFs, images) or purchase receip
 
 ### 6.6 Storage RLS
 
+**Authorization model:** Server-authorized signed URLs. Direct browser access to Storage is blocked by RLS. All upload/download/archive operations go through Edge Functions that verify ownership and issue time-limited signed URLs.
+
 ```sql
--- Storage policies for warranty-documents bucket
-CREATE POLICY "Store owners can upload"
-  ON storage.objects FOR INSERT
-  WITH CHECK (bucket_id = 'warranty-documents'
-    AND (storage.foldername(name))[1] IN (SELECT store_id::text FROM public.store_members WHERE user_id = auth.uid() AND role = 'owner'));
-
-CREATE POLICY "Store owners can read own"
-  ON storage.objects FOR SELECT
-  USING (bucket_id = 'warranty-documents'
-    AND (storage.foldername(name))[1] IN (SELECT store_id::text FROM public.store_members WHERE user_id = auth.uid() AND role = 'owner'));
-
-CREATE POLICY "Store owners can delete own"
-  ON storage.objects FOR DELETE
-  USING (bucket_id = 'warranty-documents'
-    AND (storage.foldername(name))[1] IN (SELECT store_id::text FROM public.store_members WHERE user_id = auth.uid() AND role = 'owner'));
+-- Storage policies: deny all direct authenticated/anon access
+-- Only service_role (via Edge Function) can access objects
+CREATE POLICY "Deny all direct access"
+  ON storage.objects FOR ALL
+  TO authenticated, anon
+  USING (false)
+  WITH CHECK (false);
 ```
+
+**Edge Function enforcement:**
+- Upload: Edge Function verifies caller owns the target warranty card, validates file metadata, generates unique path, issues signed upload URL.
+- Download: Edge Function verifies caller owns the document's warranty card, issues signed download URL.
+- Archive: Edge Function verifies ownership, sets `is_archived = true` on the document row. File is retained in Storage but access is denied via application logic (no new signed URLs issued for archived documents).
+- Signed URL validity after archival: URLs already issued remain valid until their natural expiry (5-minute proposal). After expiry, no new URLs are issued for archived documents. For immediate revocation, the document's storage object would need to be physically deleted (not supported in MVP — documented as a known limitation).
+- Hard delete: Not supported. Documents are archived, never physically deleted.
+
+**Path structure:** `{store_id}/{warranty_card_id}/{uuid}/{sanitized_filename}` — UUID component prevents filename collisions and overwrites.
 
 ---
 
@@ -867,18 +980,115 @@ Provider Dashboard ← Customer subscribes via Provider Checkout
 
 **Signature verification:** All webhook payloads verified using provider-specific webhook secret before processing. Invalid signatures → 401.
 
-**Duplicate event handling:**
-1. Webhook received → verify signature.
-2. Extract `provider_event_id` from payload.
-3. `INSERT INTO billing_events (provider, provider_event_id, store_id, subscription_id, event_type) VALUES (...) ON CONFLICT (provider, provider_event_id) DO NOTHING`.
-4. If row already exists (no row returned from INSERT) → return 200 (idempotent — event already processed).
-5. If new row was inserted → proceed with subscription status update in same transaction.
-6. If `subscription_id` is NULL (first-time creation before subscription row exists), look up or create the subscription from provider customer data.
-7. Update `subscription` table with new status.
+**Server-side transaction function:** All webhook processing is performed by a single database function that executes atomically:
 
-**Atomic processing:** Steps 3-7 run in a single database transaction. If any step fails, entire transaction rolled back. Concurrent duplicate webhooks are serialized by the unique constraint — one wins, the other returns 200 without processing.
+```sql
+CREATE OR REPLACE FUNCTION public.process_payment_webhook(
+  p_provider text,
+  p_provider_event_id text,
+  p_event_type text,
+  p_store_id uuid,
+  p_provider_customer_id text,
+  p_provider_subscription_id text,
+  p_event_data jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_subscription_id uuid;
+  v_amount_minor_units bigint;
+  v_currency char(3);
+BEGIN
+  -- Insert event (idempotent via unique constraint)
+  -- subscription_id is NULL for first-time creation (FK not yet established)
+  INSERT INTO public.billing_events (provider, provider_event_id, store_id, subscription_id, event_type)
+  VALUES (p_provider, p_provider_event_id, p_store_id, NULL, p_event_type)
+  ON CONFLICT (provider, provider_event_id) DO NOTHING;
 
-**Event receipt vs. processing:** `billing_events.received_at` records when the webhook was received, NOT when it was processed. This prevents false claims about processing status. Processing status is inferred from whether the `subscription` table was updated, not from a timestamp on the event row.
+  IF NOT FOUND THEN
+    RETURN;  -- Duplicate event — already processed
+  END IF;
+
+  -- Validate store exists
+  IF NOT EXISTS (SELECT 1 FROM public.stores WHERE id = p_store_id AND is_archived = false) THEN
+    RAISE EXCEPTION 'Store % not found or archived', p_store_id;
+  END IF;
+
+  -- Find subscription by provider, store, customer, and subscription IDs
+  SELECT id INTO v_subscription_id
+  FROM public.subscription
+  WHERE store_id = p_store_id
+    AND provider = p_provider
+    AND provider_customer_id = p_provider_customer_id
+    AND provider_subscription_id = p_provider_subscription_id;
+
+  -- All four identifiers must match exactly; no fallback allowed
+  IF p_provider_subscription_id IS NULL THEN
+    RAISE EXCEPTION 'Missing provider_subscription_id — cannot identify subscription';
+  END IF;
+
+  -- Only create subscription on recognized subscription events
+  IF v_subscription_id IS NULL AND p_event_type IN ('subscription.created', 'subscription.updated') THEN
+    IF p_provider_subscription_id IS NULL THEN
+      RAISE EXCEPTION 'Missing provider_subscription_id for new subscription';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM public.stores WHERE id = p_store_id AND owner_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'Invalid store for subscription creation';
+    END IF;
+    INSERT INTO public.subscription (store_id, provider, provider_customer_id, provider_subscription_id, status, current_period_end)
+    VALUES (p_store_id, p_provider, p_provider_customer_id, p_provider_subscription_id,
+            COALESCE(p_event_data->>'status', 'trialing'),
+            (p_event_data->>'current_period_end')::timestamptz)
+    RETURNING id INTO v_subscription_id;
+
+    UPDATE public.billing_events
+    SET subscription_id = v_subscription_id
+    WHERE provider = p_provider AND provider_event_id = p_provider_event_id;
+  END IF;
+
+  -- Apply event-specific changes
+  IF p_event_type IN ('subscription.created', 'subscription.updated') THEN
+    UPDATE public.subscription SET
+      status = p_event_data->>'status',
+      current_period_end = (p_event_data->>'current_period_end')::timestamptz,
+      cancel_at_period_end = COALESCE((p_event_data->>'cancel_at_period_end')::boolean, false),
+      updated_at = now()
+    WHERE id = v_subscription_id;
+  ELSIF p_event_type = 'payment.succeeded' THEN
+    IF v_subscription_id IS NULL THEN
+      RAISE EXCEPTION 'Payment event for unknown subscription';
+    END IF;
+    -- Amount normalization: the selected provider's adapter must convert provider-specific
+    -- amount format to validated integer minor units and ISO 4217 currency code BEFORE
+    -- calling this function. This section is NOT production-ready until a provider is
+    -- selected and its adapter implements the conversion.
+    RAISE EXCEPTION 'Payment amount normalization not yet implemented — provider adapter required';
+  ELSIF p_event_type = 'payment.failed' THEN
+    IF v_subscription_id IS NULL THEN
+      RAISE EXCEPTION 'Failed payment for unknown subscription';
+    END IF;
+    -- Amount normalization: same provider-adapter requirement as payment.succeeded
+    RAISE EXCEPTION 'Payment amount normalization not yet implemented — provider adapter required';
+    UPDATE public.subscription SET status = 'past_due', updated_at = now() WHERE id = v_subscription_id;
+  ELSE
+    RAISE EXCEPTION 'Unknown event type: %', p_event_type;
+  END IF;
+END;
+$$;
+
+ALTER FUNCTION public.process_payment_webhook(text, text, text, uuid, text, text, jsonb) OWNER TO postgres;
+REVOKE EXECUTE ON FUNCTION public.process_payment_webhook(text, text, text, uuid, text, text, jsonb) FROM PUBLIC, authenticated;
+GRANT EXECUTE ON FUNCTION public.process_payment_webhook(text, text, text, uuid, text, text, jsonb) TO service_role;
+```
+
+**Atomic processing:** The entire function executes as a single database transaction. If any step fails, the entire operation rolls back — no partial updates. Concurrent duplicate webhooks are serialized by the unique constraint on `(provider, provider_event_id)`.
+
+**Amount normalization:** The selected payment provider's adapter (Edge Function layer) must convert provider-specific amount formats into validated integer `amount_minor_units` and ISO 4217 currency code before calling `process_payment_webhook()`. This conversion must follow the provider's and currency's actual minor-unit rules — no universal conversion is assumed. **Payment processing is not production-ready until a provider is selected and its adapter is implemented.**
+
+**Event receipt vs. processing:** `billing_events.created_at` records when the event row was created. Processing happens within the same transaction. If the transaction succeeds, the event was processed. If it fails, no event row persists.
 
 ### 7.4 Subscription Lifecycle
 
@@ -1157,16 +1367,16 @@ Standalone (no layout):
 | 5 | **PII leakage via Edge Function** | High | Strict allowlist of response fields. Planned integration test asserts no PII fields in response. |
 | 6 | **XSS via customer name / product name** | Medium | React escapes by default. No `dangerouslySetInnerHTML`. Sanitize all rendered user input. |
 | 7 | **Audit log tampering** | Medium | `audit_events` has no SELECT/UPDATE/DELETE policies. Written only via SECURITY DEFINER trigger with `search_path = ''` and schema-qualified objects. Only allowlisted non-sensitive fields recorded. |
-| 8 | **QR code phishing** | Medium | Verify page shows store name and domain. Token is single-purpose (read-only). Disclaimer clarifies warranty info is seller-entered and unverified. |
+| 8 | **QR code phishing** | Medium | Verify page shows domain name (from the URL itself). Token is single-purpose (read-only). Disclaimer clarifies warranty info is seller-entered and unverified. |
 | 9 | **Date manipulation** | Medium | Expiry computed server-side (Edge Function) from `purchase_date`. Both client and server use same logic. Boundary date tests. |
 | 10 | **Document upload abuse** | Medium | MIME type allowlist, max file size (10 MB — proposal), path traversal prevention, signed URLs with expiry, composite FK prevents cross-store attachment. |
 | 11 | **Payment webhook spoofing** | Medium | Webhook signature verification using provider-specific secret. Reject invalid signatures. Duplicate events prevented via unique `provider_event_id`. |
 | 12 | **Subscription bypass** | High | `SubscriptionGate` component + server-side check before warranty creation. Never trust client alone. Users cannot modify their own subscription status. |
 | 13 | **Rate limiting bypass** | Low | Upstash shared rate limiting (not in-memory). Per-IP tracking. |
 | 14 | **Hard deletion of warranty history** | Medium | `DELETE` RLS policy returns `false` on `warranty_cards`. No `ON DELETE CASCADE` on documents. Archive workflow instead. |
-| 15 | **Privilege escalation (owner role)** | High | `store_members_insert` policy only allows `role = 'staff'`. Owner memberships created exclusively by `handle_new_store()` trigger (service-role). |
+| 15 | **Privilege escalation (owner role)** | High | `store_members_insert` policy only allows `role = 'staff'`. Owner memberships created exclusively by `handle_new_store()` trigger (owned by `postgres`, executes with owner's privileges). |
 | 16 | **Cross-store document attachment** | High | Composite FK `warranty_documents(store_id, warranty_card_id)` → `warranty_cards(store_id, id)` prevents attachment to cards from different stores. |
-| 17 | **SECURITY DEFINER abuse** | Critical | All SECURITY DEFINER functions use `search_path = ''`, schema-qualified objects, and `EXECUTE` restricted to `service_role` only. |
+| 17 | **SECURITY DEFINER abuse** | Critical | All SECURITY DEFINER functions use `search_path = ''` and schema-qualified objects. Functions accessing sensitive data are restricted to `service_role`. The RLS helper `get_user_owner_store_ids` is granted to `authenticated` but only returns the caller's own store IDs. |
 
 ---
 
@@ -1216,7 +1426,7 @@ Standalone (no layout):
 
 ### Phase 8 — Document Uploads
 - **Files:** `supabase/functions/document-upload/index.ts`, `src/features/documents/`
-- **Deliverables:** Upload via signed URL, document list, preview, delete, composite FK enforcement
+- **Deliverables:** Upload via signed URL, document list, preview, archive, composite FK enforcement
 - **Tests:** Integration — ownership validation, MIME type validation, cross-store attachment prevention
 - **Prerequisites:** Phase 5
 
