@@ -178,7 +178,7 @@ Token hashes stored in a `private` schema — no direct browser or anon access. 
 | Column | Type | Constraints | Notes |
 |--------|------|-------------|-------|
 | `id` | `uuid` | PK, default `gen_random_uuid()` | Separate token ID |
-| `warranty_card_id` | `uuid` | FK → `public.warranty_cards(id)`, ON DELETE CASCADE | |
+| `warranty_card_id` | `uuid` | FK → `public.warranty_cards(id)`, ON DELETE RESTRICT | RESTRICT (not CASCADE): a card must be archived, never hard-deleted, so token history cannot be silently erased |
 | `token_hash` | `text` | NOT NULL, UNIQUE | SHA-256 of raw token |
 | `is_active` | `boolean` | NOT NULL, default `true` | Set `false` on revocation |
 | `created_at` | `timestamptz` | default `now()` | |
