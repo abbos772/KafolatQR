@@ -1,0 +1,24 @@
+.container {
+  max-width: 960px;
+}
+
+.title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin: 0 0 0.25rem;
+}
+
+.subtitle {
+  color: #666;
+  margin: 0 0 1.5rem;
+}
+
+.empty {
+  background: #fff;
+  border-radius: 8px;
+  padding: 3rem;
+  text-align: center;
+  color: #999;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
