@@ -1,5 +1,5 @@
 .container {
-  max-width: 960px;
+  max-width: 1040px;
 }
 
 .title {
@@ -12,19 +12,20 @@
 .subtitle {
   color: #666;
   margin: 0 0 1.5rem;
+  font-size: 0.875rem;
 }
 
 .cardGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 1rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 2rem;
 }
 
 .card {
   background: #fff;
   border-radius: 8px;
-  padding: 1.5rem;
+  padding: 1.25rem 1.5rem;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
@@ -32,16 +33,81 @@
   font-size: 2rem;
   font-weight: 700;
   color: #6c63ff;
+  line-height: 1.1;
   margin-bottom: 0.25rem;
 }
 
 .cardLabel {
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   color: #666;
 }
 
-.note {
-  color: #999;
+.recentHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.recentTitle {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin: 0;
+}
+
+.tableWrapper {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 0.875rem;
-  font-style: italic;
+}
+
+.table th,
+.table td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+  white-space: nowrap;
+}
+
+.table th {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #777;
+  background: #fafafc;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.cellStrong {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.badgeRow {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.link {
+  color: #6c63ff;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
 }

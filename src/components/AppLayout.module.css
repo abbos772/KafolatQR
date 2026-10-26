@@ -26,7 +26,6 @@
   padding: 0.75rem 0;
   gap: 0.25rem;
 }
-
 .navLink {
   display: flex;
   align-items: center;
@@ -101,4 +100,77 @@
   .main {
     padding: 1rem;
   }
+
+  /* Keep the store switcher and sign-out reachable on small screens. */
+  .storeSelector {
+    border-bottom: none;
+    border-right: 1px solid #2a2a4a;
+    padding: 0 0.75rem 0 0;
+    margin-right: 0.75rem;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .userBox {
+    margin-top: 0;
+    border-top: none;
+    border-left: 1px solid #2a2a4a;
+    padding: 0 0 0 0.75rem;
+    align-items: flex-end;
+  }
+}
+
+/* ---- store selector, user box, error ---- */
+
+.storeSelector {
+  padding: 0 1.25rem 0.75rem;
+  border-bottom: 1px solid #2a2a4a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.storeLabel {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #7a7a95;
+}
+
+.storeSelect {
+  background: #2a2a4a;
+  color: #fff;
+  border: 1px solid #3a3a5e;
+  border-radius: 6px;
+  padding: 0.375rem 0.5rem;
+  font-size: 0.8125rem;
+  font-family: inherit;
+}
+
+.storeName {
+  font-size: 0.8125rem;
+  color: #e0e0e0;
+  font-weight: 600;
+}
+
+.userBox {
+  margin-top: auto;
+  padding: 0.75rem 1.25rem 1rem;
+  border-top: 1px solid #2a2a4a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.userEmail {
+  font-size: 0.75rem;
+  color: #b0b0c0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loadError {
+  color: #8c1d18;
+  font-size: 0.875rem;
 }

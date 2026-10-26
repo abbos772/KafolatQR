@@ -307,7 +307,7 @@ SET search_path = public, private;
 
 -- At most ONE active token per warranty card (inactive history is preserved).
 -- The index is explicitly created in the `private` schema (no reliance on search_path).
-CREATE UNIQUE INDEX IF NOT EXISTS private.warranty_tokens_one_active
+CREATE UNIQUE INDEX IF NOT EXISTS warranty_tokens_one_active
   ON private.warranty_tokens (warranty_card_id)
   WHERE is_active = true;
 
@@ -341,7 +341,7 @@ COMMENT ON FUNCTION public.get_user_owner_store_ids() IS
 
 ALTER FUNCTION public.get_user_owner_store_ids() OWNER TO postgres;
 
-REVOKE EXECUTE ON FUNCTION public.get_user_owner_store_ids() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.get_user_owner_store_ids() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_user_owner_store_ids() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_owner_store_ids() TO service_role;
 
@@ -377,7 +377,7 @@ COMMENT ON FUNCTION public.set_updated_at() IS
   'Sets updated_at = now() on UPDATE. Trigger-invoked only; no EXECUTE grant needed.';
 
 ALTER FUNCTION public.set_updated_at() OWNER TO postgres;
-REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS stores_set_updated_at          ON public.stores;
 DROP TRIGGER IF EXISTS products_set_updated_at        ON public.products;
@@ -426,7 +426,7 @@ ALTER FUNCTION public.handle_new_store() OWNER TO postgres;
 -- No direct EXECUTE grant: this is a trigger function, invoked by `on_store_created`,
 -- which does not require EXECUTE privilege (triggers run as their owner). Granting
 -- EXECUTE would only invite someone to call it directly.
-REVOKE EXECUTE ON FUNCTION public.handle_new_store() FROM PUBLIC, authenticated;
+REVOKE EXECUTE ON FUNCTION public.handle_new_store() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS on_store_created ON public.stores;
 CREATE TRIGGER on_store_created
@@ -509,8 +509,7 @@ COMMENT ON FUNCTION public.audit_log() IS
   'customer_email, notes, token hashes, secrets, and full URL values.';
 
 ALTER FUNCTION public.audit_log() OWNER TO postgres;
-REVOKE EXECUTE ON FUNCTION public.audit_log() FROM PUBLIC, authenticated;
-GRANT EXECUTE ON FUNCTION public.audit_log() TO service_role;
+REVOKE EXECUTE ON FUNCTION public.audit_log() FROM PUBLIC, anon, authenticated, service_role;
 
 DROP TRIGGER IF EXISTS warranty_cards_audit_insert ON public.warranty_cards;
 DROP TRIGGER IF EXISTS warranty_cards_audit_update ON public.warranty_cards;

@@ -1,14 +1,19 @@
 import { createClient } from '@supabase/supabase-js'
 import { getEnv } from '../lib/env'
+import type { Database } from '../types/database'
 
-let cachedClient: ReturnType<typeof createClient> | null = null
+type TypedSupabaseClient = ReturnType<typeof createClient<Database>>
 
-export function getSupabaseClient() {
+let cachedClient: TypedSupabaseClient | null = null
+
+export function getSupabaseClient(): TypedSupabaseClient {
   if (cachedClient) return cachedClient
 
   const env = getEnv()
 
-  cachedClient = createClient(env.VITE_SUPABASE_URL, env.VITE_SUPABASE_ANON_KEY, {
+  // Only the anon/publishable key is used here. The service-role key must never
+  // reach the browser: it lives solely in Edge Function secrets.
+  cachedClient = createClient<Database>(env.VITE_SUPABASE_URL, env.VITE_SUPABASE_ANON_KEY, {
     auth: {
       persistSession: true,
       autoRefreshToken: true,

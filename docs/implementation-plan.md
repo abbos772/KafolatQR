@@ -1389,7 +1389,7 @@ Standalone (no layout):
 - **Prerequisites:** Supabase project created
 
 ### Phase 2 — Database Schema + RLS
-- **Files:** `supabase/migrations/001_init.sql` (all tables + composite FKs + RLS + triggers + store creation trigger)
+- **Files:** `supabase/migrations/20251014120000_initial_schema.sql` (all tables + composite FKs + RLS + triggers + store creation trigger)
 - **Deliverables:** All tables, RLS policies, composite FKs, audit trigger, store creation trigger, private schema for tokens
 - **Tests:** Integration — cross-store isolation, anon access denial, composite FK enforcement, store creation trigger
 - **Prerequisites:** Phase 1
@@ -1498,7 +1498,7 @@ All items below are **proposals** pending explicit owner confirmation. Items mar
 6. `src/api/supabase.ts` — Supabase client
 7. `src/main.tsx` — router setup
 8. `src/App.tsx` — route definitions
-9. `supabase/migrations/001_init.sql` — all tables + composite FKs + RLS + triggers + private schema
+9. `supabase/migrations/20251014120000_initial_schema.sql` — all tables + composite FKs + RLS + triggers + private schema
 
 ---
 

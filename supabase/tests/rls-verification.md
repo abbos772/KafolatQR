@@ -1,14 +1,18 @@
 # RLS Verification Checklist — Phase 2
 
-**Status:** NOT EXECUTED. The checks below are reproducible instructions only.
+**Status:** PARTIALLY EXECUTED locally. **No result is recorded as PASS.**
 
-No PostgreSQL, Supabase CLI, Docker, or `psql` binary is available in the environment
-where this file was written (verified with `where supabase` / `where psql` /
-`where docker` / `where pg_ctl`, all empty). Therefore:
+A local Supabase stack has been started and the migration applied, and six SQL
+scripts preserved under `supabase/snippets/` show that a subset of these checks was
+run from Supabase Studio. However:
 
-- `supabase/migrations/001_init.sql` has **never been applied** to any database.
-- No RLS policy, trigger, constraint, or grant below has been executed or observed.
-- Nothing here should be read as evidence that RLS works.
+- **No output was captured.** The snippets are the scripts, not the results. Whether
+  each one raised the expected `PASS` NOTICE is not recorded anywhere in the repo.
+- Therefore **zero checks may be marked as passed.** They are recorded below as
+  `executed — result unrecorded`, which is a different thing from passing.
+- Everything not covered by a snippet is `not run`.
+- The migration is applied to the **local development stack only**. No production
+  database has been contacted.
 
 Run these checks against a **local Supabase stack or a throw-away scratch project**.
 Never run them against production data.
@@ -18,7 +22,7 @@ Never run them against production data.
 ## 1. Prerequisites
 
 1. A Supabase project you are allowed to destroy (local `supabase start`, or a scratch cloud project).
-2. `supabase/migrations/001_init.sql` applied **as `postgres`**:
+2. `supabase/migrations/20251014120000_initial_schema.sql` applied **as `postgres`**:
    ```bash
    supabase db reset          # local stack: drops and re-applies migrations
    # or, once, on a scratch project:
@@ -256,32 +260,106 @@ Legend: **Expected** = result that means the design is correct.
 
 ---
 
+## 3A. Execution status (what has actually been run)
+
+Evidence = the SQL scripts saved by Supabase Studio under `supabase/snippets/`.
+
+| Check(s) | What the script does | Status | Evidence |
+|---|---|---|---|
+| C3, F1 | Asserts `warranty_cards_product_same_store` rejects a warranty card whose product belongs to another store (expects `foreign_key_violation`) | **executed — result unrecorded** | snippets 362, 500 |
+| M1 (partial) | Inserts a store **as `authenticated`** with simulated JWT claims, so the `stores_insert` WITH CHECK and the `on_store_created` trigger both fire | **executed — result unrecorded** | snippet 438 |
+| (setup sanity) | Confirms `auth.uid()` / `auth.role()` resolve under the simulated JWT claims | **executed — result unrecorded** | snippet 692 |
+| M2, T3 | Counts owner memberships per store where `user_id = owner_id`, and asserts `verify_warranty_by_hash` is **not** created yet (expected until Phase 5/7) | **executed — result unrecorded** | snippet 773 |
+| T4 | Asserts `authenticated` cannot INSERT into `payment_transactions` (expects `insufficient_privilege`) | **executed — result unrecorded** | snippet 994 |
+
+**Everything else is NOT RUN:** S1–S2, S4–S15, A1–A4, C1, C2, C4–C7, N1–N10,
+F2, F3–F3f, F4–F7, M3–M8, O1–O5, T1, T2, T5, T6, D1–D5, AU1–AU7.
+
+### Why these are not marked passed
+
+Each script raises a `PASS` NOTICE only if the expected exception fires, so a *silent*
+success would have printed nothing and looked like a pass. Without the captured
+NOTICE output, "the script exists" is not evidence that the guard held. Re-run each
+one and paste the NOTICE/pgAdmin-visible output into the table below.
+
+### To turn them into recorded results
+
+Run in Supabase Studio SQL editor against the **local** stack, then paste the output:
+
+```sql
+-- M1 + M2 (rerun; snippet 438 + 773 combined)
+BEGIN;
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claims',
+  '{"sub":"2a877c86-0df7-4e48-af7a-f5af2f7914f9","role":"authenticated"}', true);
+INSERT INTO public.stores (owner_id, name)
+VALUES ('2a877c86-0df7-4e48-af7a-f5af2f7914f9', 'Store A (rerun)')
+RETURNING id AS store_id, owner_id, name;
+COMMIT;
+
+-- then, as postgres, confirm exactly one owner membership for that store:
+-- SELECT store_id, role, user_id FROM public.store_members
+--  WHERE store_id = '<id returned above>';
+```
+
+| Check | Date | Recorded NOTICE / output | Recorded by | Verdict |
+|---|---|---|---|---|
+| C3 / F1 | | | | ☐ pass ☐ fail |
+| M1 | | | | ☐ pass ☐ fail |
+| M2 | | | | ☐ pass ☐ fail |
+| T3 | | | | ☐ pass ☐ fail |
+| T4 | | | | ☐ pass ☐ fail |
+
+### Local fixtures observed in the snippets
+
+Recorded so the re-runs can reuse the same data (local dev values, not secrets):
+
+- Owner A `auth.users.id` = `2a877c86-0df7-4e48-af7a-f5af2f7914f9`
+- Store id used in the cross-store test = `1d583bae-8d53-4124-9c72-b12c409fa0bd`
+- Product id used in the cross-store test = `e58de6d1-30f1-419a-8924-c26f0770f2a7`
+
+If the local database is ever rebuilt (`supabase db reset`), these ids change and the
+scripts above must be re-derived. This author deliberately does **not** run
+`db reset` as part of a verification step.
+
+---
+
 ## 4. Result template
+
+**Nothing in this template is set. Every row must stay `not run` until output exists.**
 
 | ID | Status | Executed by | Date | Evidence |
 |----|--------|-------------|------|----------|
-| S1–S15 | ☐ pass ☐ fail ☐ not run | | | |
-| A1–A4 | ☐ pass ☐ fail ☐ not run | | | |
-| C1–C7 | ☐ pass ☐ fail ☐ not run | | | |
-| N1–N10 | ☐ pass ☐ fail ☐ not run | | | |
-| F1–F3f | ☐ pass ☐ fail ☐ not run | | | |
-| M1–M8 | ☐ pass ☐ fail ☐ not run | | | |
-| O1–O5 | ☐ pass ☐ fail ☐ not run | | | |
-| T1–T6 | ☐ pass ☐ fail ☐ not run | | | |
-| D1–D5 | ☐ pass ☐ fail ☐ not run | | | |
-| AU1–AU7 | ☐ pass ☐ fail ☐ not run | | | |
+| S1–S15 | ☐ not run ☐ pass ☐ fail — (S1–S2, S4–S15 not run) | | | |
+| A1–A4 | ☐ not run ☐ pass ☐ fail | | | |
+| C1–C7 | ☐ not run ☐ pass ☐ fail — (C3 executed, result unrecorded) | | | |
+| N1–N10 | ☐ not run ☐ pass ☐ fail | | | |
+| F1–F3f | ☐ not run ☐ pass ☐ fail — (F1 executed, result unrecorded) | | | |
+| M1–M8 | ☐ not run ☐ pass ☐ fail — (M1 partial, M2 executed, results unrecorded) | | | |
+| O1–O5 | ☐ not run ☐ pass ☐ fail | | | |
+| T1–T6 | ☐ not run ☐ pass ☐ fail — (T3, T4 executed, results unrecorded) | | | |
+| D1–D5 | ☐ not run ☐ pass ☐ fail | | | |
+| AU1–AU7 | ☐ not run ☐ pass ☐ fail | | | |
 
-Fill this in after each execution. Until then the correct status for every line is **not run**.
+Set a row to `pass`/`fail` only with a link or pasted output proving it.
 
 ---
 
 ## 5. Notes for reviewers
 
+- **Evidence location:** the executed scripts live in `supabase/snippets/*.sql`
+  (Supabase Studio auto-saves). They are currently **untracked and not gitignored**,
+  so `git add -A` would commit them. Decide deliberately: either commit them as
+  Phase 2 verification evidence, or add `snippets/` to `supabase/.gitignore` and keep
+  evidence outside Git. Do not leave the choice implicit.
+- **Local-only execution:** the scripts ran against a local Supabase stack.
+  Nothing was run against a production database, and `db reset` was not used as
+  part of verification (it would destroy the fixtures the scripts depend on).
 - **What is *not* covered here:** token RPCs, `verify_warranty_by_hash`,
   `process_payment_webhook`, Storage policies, and any seeded/demo data —
   these belong to later phases of the approved plan.
 - **`private` schema reachability:** the `private` schema is not exposed by
-  PostgREST by default, and `001_init.sql` additionally grants nothing on it to
+   PostgREST by default, and `20251014120000_initial_schema.sql` additionally grants nothing on it to
   `anon`/`authenticated`. If a future project setting exposes `private` via
   PostgREST, T1/T2 must be re-run.
 - **`get_user_owner_store_ids` RPC exposure:** PostgREST exposes `public`
@@ -295,7 +373,7 @@ Fill this in after each execution. Until then the correct status for every line 
 - **RLS vs. TRUNCATE (checks S12–S14, T6):** PostgreSQL's `CREATE POLICY`
   documentation states that **TRUNCATE is not subject to row-level security**.
   An RLS policy of `USING (false)` therefore does *not* stop TRUNCATE. The
-  `REVOKE ALL ... FROM PUBLIC, anon, authenticated` block in `001_init.sql`
+   `REVOKE ALL ... FROM PUBLIC, anon, authenticated` block in `20251014120000_initial_schema.sql`
   is what actually removes that capability, so those checks are the ones that
   must never be dropped.
 - **Two-layer expectation:** several checks expect `permission denied` because
